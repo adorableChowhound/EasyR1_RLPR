@@ -1,11 +1,5 @@
 # EasyR1-RLPR: RLPR Implementation Based on EasyR1
 
-<h4 align="center">
-    <p>
-        <a href="README_zh.md">中文</a> | <b>English</b>
-    </p>
-</h4>
-
 <div align="center">
 
 [![Paper](https://img.shields.io/badge/Paper-RLPR-purple)](https://arxiv.org/abs/2506.18254)
@@ -13,6 +7,12 @@
 [![Original RLPR](https://img.shields.io/badge/Original-RLPR-orange)](https://github.com/OpenBMB/RLPR)
 
 </div>
+
+<h4 align="center">
+    <p>
+        <a href="README_zh.md">中文</a> | <b>English</b>
+    </p>
+</h4>
 
 ## 📖 Project Overview
 
@@ -221,6 +221,3 @@ This project implements the core features of RLPR on the EasyR1 framework:
 
 For questions or suggestions, feel free to submit an Issue or Pull Request.
 
-## 📄 License
-
-This project follows the Apache 2.0 license. The datasets follow the CC BY NC 4.0 license (non-commercial use only).

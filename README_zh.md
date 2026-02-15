@@ -215,6 +215,3 @@ STD_FILTER_BETA=0.5
 
 如有问题或建议，欢迎提交 Issue 或 Pull Request。
 
-## 📄 许可证
-
-本项目遵循 Apache 2.0 许可证。数据集遵循 CC BY NC 4.0 许可证（仅限非商业用途）。
