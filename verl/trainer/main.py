@@ -91,6 +91,12 @@ def main():
     cli_args = OmegaConf.from_cli()
     default_config = OmegaConf.structured(PPOConfig())
 
+    # Set struct=False recursively to allow type changes and new keys
+    OmegaConf.set_struct(default_config, False)
+    for key in default_config:
+        if OmegaConf.is_dict(default_config[key]):
+            OmegaConf.set_struct(default_config[key], False)
+
     if hasattr(cli_args, "config"):
         config_path = cli_args.pop("config", None)
         file_config = OmegaConf.load(config_path)

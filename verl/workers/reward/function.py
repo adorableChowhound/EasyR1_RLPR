@@ -92,7 +92,19 @@ class BatchFunctionRewardManagerMixin:
                 }
             )
 
-        scores = self.reward_fn(reward_inputs)
+        # Check if reward function accepts batch_data parameter (for RLPR)
+        import inspect
+        sig = inspect.signature(self.reward_fn.func if hasattr(self.reward_fn, 'func') else self.reward_fn)
+        if 'batch_data' in sig.parameters:
+            # Pass batch_data for RLPR extended interface
+            # Merge tensor and non-tensor data for RLPR access
+            batch_data_dict = dict(data.batch)
+            batch_data_dict.update(data.non_tensor_batch)
+            scores = self.reward_fn(reward_inputs, batch_data=batch_data_dict)
+        else:
+            # Standard interface without batch_data
+            scores = self.reward_fn(reward_inputs)
+
         reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
         reward_metrics = defaultdict(list)
         for i, score in enumerate(scores):

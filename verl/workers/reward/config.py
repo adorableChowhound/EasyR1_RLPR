@@ -27,6 +27,11 @@ class RewardConfig:
     reward_function_kwargs: dict = field(default_factory=dict)
     skip_special_tokens: bool = True
     num_cpus: int = 1
+    # RLPR configuration
+    use_rlpr: bool = False
+    """Enable RLPR (Reinforcement Learning from Probability Reward)"""
+    rlpr_format_mode: str = "R1"
+    """RLPR format mode: 'R1' or 'R1_nothink'"""
     # below are auto keys
     reward_function_name: Optional[str] = field(default=None, init=False)
 
@@ -38,3 +43,7 @@ class RewardConfig:
                 self.reward_function, self.reward_function_name = self.reward_function.rsplit(":", maxsplit=1)
 
             self.reward_function = get_abs_path(self.reward_function, prompt="Reward function")
+
+        # Auto-enable RLPR if using compute_score_extended
+        if self.reward_function_name == "compute_score_extended":
+            self.use_rlpr = True

@@ -175,7 +175,7 @@ def compute_gae_advantage_return(
 @register_adv_estimator(AdvantageEstimator.GRPO)
 def compute_grpo_outcome_advantage(
     token_level_rewards: torch.Tensor, response_mask: torch.Tensor, index: torch.Tensor, eps: float = 1e-6, **kwargs
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Compute advantage for GRPO, operating only on Outcome reward (with only one scalar reward for each response).
 
@@ -194,6 +194,8 @@ def compute_grpo_outcome_advantage(
             shape: (bs, response_length)
         returns: `(torch.Tensor)`
             shape: (bs, response_length)
+        reward_stds: `(torch.Tensor)`
+            shape: (bs,) - standard deviation of rewards for each prompt group
 
     """
     scores = token_level_rewards.sum(dim=-1)
@@ -209,11 +211,14 @@ def compute_grpo_outcome_advantage(
         id2mean[idx] = torch.mean(torch.tensor(id2score[idx]))
         id2std[idx] = torch.std(torch.tensor(id2score[idx]))
 
+    # Create reward_stds tensor to store std for each sample
+    reward_stds = torch.zeros_like(scores)
     for i in range(bsz):
         scores[i] = (scores[i] - id2mean[index[i]]) / (id2std[index[i]] + eps)
+        reward_stds[i] = id2std[index[i]]
 
     returns = scores.unsqueeze(-1) * response_mask
-    return returns, returns
+    return returns, returns, reward_stds
 
 
 @register_adv_estimator(AdvantageEstimator.GRPO_PASSK)

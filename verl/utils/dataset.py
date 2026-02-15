@@ -150,7 +150,16 @@ class RLHFDataset(Dataset):
             )
 
     def _build_messages(self, example: dict[str, Any]) -> list[dict[str, Any]]:
-        prompt_str: str = example[self.prompt_key]
+        prompt_data = example[self.prompt_key]
+
+        # Handle case where prompt is already a list of messages
+        if isinstance(prompt_data, (list, tuple)):
+            return list(prompt_data)
+        elif isinstance(prompt_data, np.ndarray):
+            return prompt_data.tolist()
+
+        # Handle case where prompt is a string
+        prompt_str: str = prompt_data
         if self.format_prompt:
             format_prompt = Template(self.format_prompt.strip())
             prompt_str = format_prompt.render(content=prompt_str)
@@ -305,5 +314,14 @@ class RLHFDataset(Dataset):
         example["attention_mask"] = attention_mask
         example["position_ids"] = position_ids
         example["raw_prompt_ids"] = raw_prompt_ids
-        example["ground_truth"] = example.pop(self.answer_key)
+
+        # Handle ground_truth extraction
+        if self.answer_key in example:
+            example["ground_truth"] = example.pop(self.answer_key)
+        elif "reward_model" in example and isinstance(example["reward_model"], dict):
+            # Handle case where ground_truth is in reward_model dict
+            example["ground_truth"] = example["reward_model"].get("ground_truth", "")
+        else:
+            example["ground_truth"] = ""
+
         return example

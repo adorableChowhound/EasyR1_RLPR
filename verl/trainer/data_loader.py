@@ -15,7 +15,7 @@
 from typing import Optional
 
 import torch
-from torch.utils.data import RandomSampler, SequentialSampler
+from torch.utils.data import RandomSampler, SequentialSampler, ConcatDataset
 from torchdata.stateful_dataloader import StatefulDataLoader
 from transformers import PreTrainedTokenizer, ProcessorMixin
 
@@ -65,23 +65,52 @@ def create_dataloader(config: DataConfig, tokenizer: PreTrainedTokenizer, proces
         drop_last=True,
     )
 
-    val_dataset = RLHFDataset(
-        data_path=config.val_files,
-        tokenizer=tokenizer,
-        processor=processor,
-        prompt_key=config.prompt_key,
-        answer_key=config.answer_key,
-        image_key=config.image_key,
-        video_key=config.video_key,
-        image_dir=config.image_dir,
-        video_fps=config.video_fps,
-        max_prompt_length=config.max_prompt_length,
-        truncation="right",
-        format_prompt=config.format_prompt,
-        min_pixels=config.min_pixels,
-        max_pixels=config.max_pixels,
-        filter_overlong_prompts=config.filter_overlong_prompts,
-    )
+    # Support both single file and list of files for validation
+    if config.val_files is None or config.val_files == "":
+        raise ValueError("val_files must be specified")
+
+    if isinstance(config.val_files, list):
+        # Create multiple datasets and concatenate them
+        val_datasets = []
+        for val_file in config.val_files:
+            val_dataset = RLHFDataset(
+                data_path=val_file,
+                tokenizer=tokenizer,
+                processor=processor,
+                prompt_key=config.prompt_key,
+                answer_key=config.answer_key,
+                image_key=config.image_key,
+                video_key=config.video_key,
+                image_dir=config.image_dir,
+                video_fps=config.video_fps,
+                max_prompt_length=config.max_prompt_length,
+                truncation="right",
+                format_prompt=config.format_prompt,
+                min_pixels=config.min_pixels,
+                max_pixels=config.max_pixels,
+                filter_overlong_prompts=config.filter_overlong_prompts,
+            )
+            val_datasets.append(val_dataset)
+        val_dataset = ConcatDataset(val_datasets)
+    else:
+        # Single validation file
+        val_dataset = RLHFDataset(
+            data_path=config.val_files,
+            tokenizer=tokenizer,
+            processor=processor,
+            prompt_key=config.prompt_key,
+            answer_key=config.answer_key,
+            image_key=config.image_key,
+            video_key=config.video_key,
+            image_dir=config.image_dir,
+            video_fps=config.video_fps,
+            max_prompt_length=config.max_prompt_length,
+            truncation="right",
+            format_prompt=config.format_prompt,
+            min_pixels=config.min_pixels,
+            max_pixels=config.max_pixels,
+            filter_overlong_prompts=config.filter_overlong_prompts,
+        )
 
     if config.val_batch_size == -1:
         val_batch_size = len(val_dataset)

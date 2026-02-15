@@ -17,7 +17,7 @@ PPO config
 
 import os
 from dataclasses import asdict, dataclass, field, fields, is_dataclass
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Any
 
 from ..utils.py_functional import get_abs_path
 from ..workers.config import WorkerConfig
@@ -35,7 +35,7 @@ def recursive_post_init(dataclass_obj):
 @dataclass
 class DataConfig:
     train_files: str = ""
-    val_files: str = ""
+    val_files: Any = None  # Can be str or list of str
     prompt_key: str = "prompt"
     answer_key: str = "answer"
     image_key: str = "images"
@@ -57,6 +57,10 @@ class DataConfig:
     filter_overlong_prompts_workers: int = 16
 
     def post_init(self):
+        # Backward compatibility: if train_batch_size is provided, use it for rollout_batch_size
+        if hasattr(self, 'train_batch_size') and self.train_batch_size is not None:
+            self.rollout_batch_size = self.train_batch_size
+
         self.image_dir = get_abs_path(self.image_dir, prompt="Image directory")
         self.format_prompt = get_abs_path(self.format_prompt, prompt="Format prompt file")
         self.override_chat_template = get_abs_path(self.override_chat_template, prompt="Chat template file")
@@ -92,6 +96,18 @@ class AlgorithmConfig:
     """filter out low reward samples if online filtering"""
     filter_high: float = 0.99
     """filter out high reward samples if online filtering"""
+    filter_mode: str = "default"
+    """filter mode: 'default' (static threshold) or 'ema_std' (dynamic EMA-based std filtering)"""
+    filter_target: str = "reward_std"
+    """filter target: 'reward_std' (standard deviation of rewards per prompt)"""
+    filter_ema_ratio: float = 0.99
+    """EMA ratio for dynamic threshold update (higher = more smoothing)"""
+    filter_ema_start_step: int = 6
+    """step to start computing EMA"""
+    filter_start_step: int = 11
+    """step to start filtering"""
+    std_filter_beta: float = 0.5
+    """beta coefficient for std filtering: threshold = ema_mean * beta"""
 
 
 @dataclass

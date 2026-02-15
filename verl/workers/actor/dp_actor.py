@@ -216,6 +216,67 @@ class DataParallelPPOActor(BasePPOActor):
 
         return log_probs
 
+    @torch.no_grad()
+    def compute_log_prob_pr(self, data: DataProto) -> torch.Tensor:
+        """Compute the log probability for RLPR (replaced sequences)
+
+        This method computes log probabilities for sequences where the answer has been
+        replaced with ground truth. The input data should contain fields with '_pr' suffix.
+
+        Args:
+            data (DataProto): a DataProto containing keys with '_pr' suffix:
+                ``input_ids_pr``: tensor of shape [batch_size, sequence_length]. torch.int64.
+                ``attention_mask_pr``: tensor of shape [batch_size, sequence_length]. torch.int64.
+                ``position_ids_pr``: tensor of shape [batch_size, sequence_length]. torch.int64.
+                ``responses_pr``:  tensor of shape [batch_size, response_length]. torch.int64.
+
+        Returns:
+            torch.Tensor: the log_prob tensor for replaced sequences
+        """
+        self.actor_module.eval()
+
+        temperature = data.meta_info.get("temperature", 1.0)
+
+        # Select _pr fields and temporarily rename them for forward pass
+        select_keys = ["input_ids_pr", "attention_mask_pr", "position_ids_pr", "responses_pr"]
+        non_tensor_select_keys = ["multi_modal_inputs"]  # multi-modal inputs don't need _pr suffix
+
+        # Create a copy of the data with _pr suffix removed for forward pass
+        data_pr = data.select(select_keys, non_tensor_select_keys)
+
+        # Rename fields: remove _pr suffix for forward pass
+        batch_renamed = {}
+        for key in ["input_ids", "attention_mask", "position_ids", "responses"]:
+            pr_key = f"{key}_pr"
+            if pr_key in data_pr.batch:
+                batch_renamed[key] = data_pr.batch[pr_key]
+
+        # Update the batch with renamed keys
+        data_pr.batch.update(batch_renamed)
+
+        # Use dynamic batching if configured
+        if self.config.dynamic_batching:
+            max_token_len = self.config.micro_batch_size_per_device_for_experience * data_pr.batch["input_ids"].size(-1)
+            micro_batches, batch_idx_list = prepare_dynamic_batch(data_pr, max_token_len=max_token_len)
+        else:
+            micro_batches = data_pr.split(self.config.micro_batch_size_per_device_for_experience)
+
+        log_probs_lst = []
+        if self.rank == 0:
+            micro_batches = tqdm(micro_batches, desc="Compute log probs (RLPR)", position=1)
+
+        for micro_batch in micro_batches:
+            model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch}
+            log_probs = self._forward_micro_batch(model_inputs, temperature=temperature)
+            log_probs_lst.append(log_probs)
+
+        log_probs = torch.concat(log_probs_lst, dim=0)
+
+        if self.config.dynamic_batching:
+            log_probs = restore_dynamic_batch(log_probs, batch_idx_list)
+
+        return log_probs
+
     def update_policy(self, data: DataProto) -> dict[str, Any]:
         self.actor_module.train()
 

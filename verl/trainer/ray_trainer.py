@@ -29,6 +29,7 @@ import numpy as np
 import ray
 import torch
 from ray.experimental.tqdm_ray import tqdm
+from tensordict import TensorDict
 from torchdata.stateful_dataloader import StatefulDataLoader
 from transformers import PreTrainedTokenizer, ProcessorMixin
 
@@ -149,7 +150,14 @@ def compute_advantage(data: DataProto, adv_estimator: AdvantageEstimator, gamma:
     if "reward_baselines" in data.batch:
         adv_inputs["reward_baselines"] = data.batch["reward_baselines"]
 
-    advantages, returns = compute_advantage_return(adv_estimator, **adv_inputs)
+    result = compute_advantage_return(adv_estimator, **adv_inputs)
+    # Handle both 2-tuple and 3-tuple returns (for GRPO with reward_stds)
+    if len(result) == 3:
+        advantages, returns, reward_stds = result
+        data.batch["reward_stds"] = reward_stds
+    else:
+        advantages, returns = result
+
     data.batch["advantages"] = advantages
     data.batch["returns"] = returns
     return data
@@ -190,6 +198,20 @@ class RayPPOTrainer:
         self.resource_pool_manager = resource_pool_manager
         self.use_reward_model = Role.RewardModel in role_worker_mapping
         self.ray_worker_group_cls = ray_worker_group_cls
+
+        # Initialize RLPR helper if enabled
+        self.use_rlpr = config.worker.reward.use_rlpr
+        if self.use_rlpr:
+            from ..utils.rlpr_helper import RLPRHelper
+            self.rlpr_helper = RLPRHelper(
+                tokenizer=tokenizer,
+                format_mode=config.worker.reward.rlpr_format_mode,
+                max_prompt_length=config.data.max_prompt_length,
+                max_response_length=config.data.max_response_length,
+            )
+            print(f"RLPR enabled with format_mode={config.worker.reward.rlpr_format_mode}")
+        else:
+            self.rlpr_helper = None
 
         # define KL control
         if config.algorithm.disable_kl:
@@ -246,6 +268,17 @@ class RayPPOTrainer:
         config.worker.actor.optim.training_steps = self.training_steps
         config.worker.critic.optim.training_steps = self.training_steps
         print(f"Total training steps: {self.training_steps}")
+
+        # Initialize EMA filtering variables
+        if config.algorithm.filter_mode == "ema_std":
+            self.ema_mean = None
+            self.std_history = []
+            print(f"EMA-based std filtering enabled: ema_ratio={config.algorithm.filter_ema_ratio}, "
+                  f"beta={config.algorithm.std_filter_beta}, "
+                  f"start_step={config.algorithm.filter_start_step}")
+        else:
+            self.ema_mean = None
+            self.std_history = None
 
     def init_workers(self) -> None:
         """Init resource pool and worker group"""
@@ -417,6 +450,10 @@ class RayPPOTrainer:
             test_batch = test_batch.repeat(repeat_times=repeat_times, interleave=True)
             test_batch = test_batch.union(test_output_gen_batch)
 
+            # Process RLPR if enabled (for validation)
+            if self.use_rlpr:
+                test_batch = self._process_rlpr(test_batch)
+
             # evaluate using reward_function
             reward_tensor, reward_metrics = ray.get(self.val_reward_fn.compute_reward.remote(test_batch))
 
@@ -445,6 +482,85 @@ class RayPPOTrainer:
         val_length_metrics = {f"val_{key}": value for key, value in reduce_metrics(length_metrics_lst).items()}
         print("Finish validation.")
         return {"val/reward_score": self.val_reward_score, **val_reward_metrics, **val_length_metrics}
+
+    def _process_rlpr(self, batch: DataProto) -> DataProto:
+        """
+        Process RLPR: replace answers with ground truth and compute log probabilities.
+
+        This method:
+        1. Extracts ground truth from batch
+        2. Uses RLPRHelper to replace model-generated answers with ground truth
+        3. Computes log probabilities for the replaced sequences
+        4. Adds RLPR-specific fields to batch for reward computation
+
+        Args:
+            batch: DataProto containing generated sequences
+
+        Returns:
+            Updated DataProto with RLPR fields added
+        """
+        if not self.use_rlpr or self.rlpr_helper is None:
+            return batch
+
+        # Extract ground truth from batch
+        ground_truths = batch.non_tensor_batch.get("ground_truth")
+        if ground_truths is None:
+            print("WARNING: RLPR enabled but no 'ground_truth' field in batch. Skipping RLPR processing.")
+            return batch
+
+        # Convert to list if needed
+        if hasattr(ground_truths, 'tolist'):
+            ground_truths = ground_truths.tolist()
+        elif not isinstance(ground_truths, list):
+            ground_truths = list(ground_truths)
+
+        # Batch replace answers with ground truth
+        try:
+            rlpr_results = self.rlpr_helper.batch_replace_answer_with_ground_truth(
+                batch_input_ids=batch.batch["input_ids"],
+                batch_prompts=batch.batch["prompts"],
+                batch_responses=batch.batch["responses"],
+                ground_truths=ground_truths,
+            )
+        except Exception as e:
+            print(f"WARNING: RLPR answer replacement failed: {e}. Skipping RLPR processing.")
+            return batch
+
+        # Compute log probabilities for replaced sequences
+        # Create a temporary DataProto for RLPR computation
+        rlpr_batch = DataProto(
+            batch=TensorDict(
+                {
+                    "input_ids": rlpr_results["input_ids_pr"],
+                    "attention_mask": rlpr_results["attention_mask_pr"],
+                    "position_ids": rlpr_results["position_ids_pr"],
+                    "prompts": batch.batch["prompts"],  # Keep original prompts
+                    "responses": rlpr_results["responses_pr"],
+                    "response_mask": batch.batch["response_mask"],  # Use original response mask
+                },
+                batch_size=batch.batch.batch_size,
+            ),
+            non_tensor_batch={},
+            meta_info={},
+        )
+
+        # Compute log probs for replaced sequences
+        try:
+            log_probs_output = self.actor_rollout_ref_wg.compute_log_probs(rlpr_batch)
+            old_log_probs_pr = log_probs_output.batch["old_log_probs"]
+        except Exception as e:
+            print(f"WARNING: RLPR log prob computation failed: {e}. Skipping RLPR processing.")
+            return batch
+
+        # Add RLPR fields to original batch
+        batch.batch["old_log_probs_pr"] = old_log_probs_pr
+        batch.batch["ground_truth_mask_pr"] = rlpr_results["ground_truth_mask_pr"]
+
+        # Optional: add scoreA if available in batch
+        if "scoreA" in batch.non_tensor_batch:
+            batch.batch["scoreA"] = batch.non_tensor_batch["scoreA"]
+
+        return batch
 
     def _balance_batch(self, batch: DataProto, metrics: dict[str, Any], logging_prefix: str = "global_seqlen") -> None:
         """Reorder the data on single controller such that each dp rank gets similar total tokens"""
@@ -514,6 +630,10 @@ class RayPPOTrainer:
             new_batch = new_batch.repeat(repeat_times=self.config.worker.rollout.n, interleave=True)
             new_batch = new_batch.union(gen_batch_output)
 
+            # Process RLPR if enabled (before computing reward for filtering)
+            if self.use_rlpr and self.config.algorithm.online_filtering:
+                new_batch = self._process_rlpr(new_batch)
+
             # filter group
             if self.config.algorithm.online_filtering:
                 reward_tensor, reward_metrics = ray.get(self.reward_fn.compute_reward.remote(new_batch))
@@ -521,23 +641,89 @@ class RayPPOTrainer:
                 for k, v in reward_metrics.items():
                     all_metrics[k].extend(v)
 
-                filter_scores = reward_metrics[self.config.algorithm.filter_key]
-                uids = new_batch.non_tensor_batch["uid"]
-                uid2scores = defaultdict(list)
-                for uid, score in zip(uids, filter_scores):
-                    uid2scores[uid].append(score)
+                # Determine filter mode
+                if self.config.algorithm.filter_mode == "ema_std":
+                    # EMA-based std filtering
+                    # Convert token_level_scores to token_level_rewards for advantage computation
+                    # (In filtering stage, we don't have KL penalty yet, so just copy)
+                    new_batch.batch["token_level_rewards"] = new_batch.batch["token_level_scores"]
 
-                uid2mean = {uid: np.mean(scores) for uid, scores in uid2scores.items()}
-                kept_uids = [
-                    uid
-                    for uid, avg_score in uid2mean.items()
-                    if avg_score > self.config.algorithm.filter_low and avg_score < self.config.algorithm.filter_high
-                ]
-                kept_sample_idxs = [idx for idx, uid in enumerate(uids) if uid in kept_uids]
-                if len(kept_sample_idxs) == 0:
-                    raise RuntimeError("No sample is kept after filtering. Please check your data.")
+                    # First compute advantages to get reward_stds
+                    temp_batch = compute_advantage(
+                        new_batch,
+                        adv_estimator=self.config.algorithm.adv_estimator,
+                        gamma=self.config.algorithm.gamma,
+                        lam=self.config.algorithm.lam,
+                    )
 
-                new_batch = new_batch[kept_sample_idxs]
+                    if "reward_stds" in temp_batch.batch:
+                        reward_stds = temp_batch.batch["reward_stds"]
+                        uids = new_batch.non_tensor_batch["uid"]
+
+                        # Collect std values for EMA update
+                        if self.global_step >= self.config.algorithm.filter_ema_start_step:
+                            valid_stds = [std.item() for std in reward_stds
+                                         if not (torch.isnan(std) or torch.isinf(std))]
+                            if valid_stds:
+                                step_mean_std = np.mean(valid_stds)
+                                self.std_history.append(step_mean_std)
+
+                                # Update EMA
+                                if self.ema_mean is None:
+                                    self.ema_mean = step_mean_std
+                                else:
+                                    self.ema_mean = (step_mean_std * (1 - self.config.algorithm.filter_ema_ratio) +
+                                                    self.ema_mean * self.config.algorithm.filter_ema_ratio)
+
+                                print(f"Step {self.global_step}: mean_std={step_mean_std:.4f}, ema_mean={self.ema_mean:.4f}")
+
+                        # Apply filtering if past start_step
+                        if self.global_step >= self.config.algorithm.filter_start_step and self.ema_mean is not None:
+                            threshold = self.ema_mean * self.config.algorithm.std_filter_beta
+
+                            # Group by uid and compute mean std per prompt
+                            uid2stds = defaultdict(list)
+                            for uid, std in zip(uids, reward_stds):
+                                uid2stds[uid].append(std.item())
+
+                            uid2mean_std = {uid: np.mean(stds) for uid, stds in uid2stds.items()}
+                            kept_uids = [uid for uid, mean_std in uid2mean_std.items() if mean_std >= threshold]
+                            kept_sample_idxs = [idx for idx, uid in enumerate(uids) if uid in kept_uids]
+
+                            filter_rate = 1.0 - len(kept_uids) / len(uid2mean_std) if len(uid2mean_std) > 0 else 0.0
+                            print(f"EMA std filtering: threshold={threshold:.4f}, filter_rate={filter_rate:.2%}, "
+                                  f"kept={len(kept_uids)}/{len(uid2mean_std)} prompts")
+                            metrics.update({
+                                "filter/ema_threshold": threshold,
+                                "filter/ema_mean": self.ema_mean,
+                                "filter/rate": filter_rate,
+                            })
+
+                            if len(kept_sample_idxs) == 0:
+                                print("Warning: No sample kept after EMA std filtering. Keeping all samples.")
+                            else:
+                                new_batch = new_batch[kept_sample_idxs]
+                    else:
+                        print("Warning: reward_stds not available, skipping EMA std filtering")
+                else:
+                    # Default filtering by reward value
+                    filter_scores = reward_metrics[self.config.algorithm.filter_key]
+                    uids = new_batch.non_tensor_batch["uid"]
+                    uid2scores = defaultdict(list)
+                    for uid, score in zip(uids, filter_scores):
+                        uid2scores[uid].append(score)
+
+                    uid2mean = {uid: np.mean(scores) for uid, scores in uid2scores.items()}
+                    kept_uids = [
+                        uid
+                        for uid, avg_score in uid2mean.items()
+                        if avg_score > self.config.algorithm.filter_low and avg_score < self.config.algorithm.filter_high
+                    ]
+                    kept_sample_idxs = [idx for idx, uid in enumerate(uids) if uid in kept_uids]
+                    if len(kept_sample_idxs) == 0:
+                        raise RuntimeError("No sample is kept after filtering. Please check your data.")
+
+                    new_batch = new_batch[kept_sample_idxs]
 
             batch = DataProto.concat([batch, new_batch]) if batch is not None else new_batch
             current_batch_size = len(batch) // self.config.worker.rollout.n
@@ -597,6 +783,12 @@ class RayPPOTrainer:
                 # NOTE: this breaks the order of data inside the batch.
                 # Please take care when you implement group based adv computation such as GRPO and rloo
                 self._balance_batch(batch, metrics=metrics)
+
+                # Process RLPR if enabled (before computing reward)
+                # Skip if already processed during online_filtering in _make_batch_data
+                if self.use_rlpr and not self.config.algorithm.online_filtering:
+                    with timer("rlpr", timing_raw):
+                        batch = self._process_rlpr(batch)
 
                 # compute global valid tokens
                 batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
