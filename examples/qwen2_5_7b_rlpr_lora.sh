@@ -59,4 +59,7 @@ python3 -m verl.trainer.main \
     algorithm.filter_ema_start_step=${FILTER_EMA_START_STEP} \
     algorithm.filter_start_step=${FILTER_START_STEP} \
     algorithm.std_filter_beta=${STD_FILTER_BETA} \
+    trainer.total_epochs=1 \
+    trainer.val_freq=50 \
+    trainer.save_freq=50 \
     "$@"
