@@ -89,16 +89,16 @@ After downloading, your data directory structure should look like this:
 
 ```
 datasets/
-├── train/
-│   └── rlpr_train.parquet
-└── test/
-    ├── MMLUPro-1000_Avg2.parquet
-    ├── Math-500_Avg2.parquet
-    ├── gpqa_diamond_Avg4.parquet
-    ├── AIME2024_Avg16.parquet
-    ├── WebInstruct-verified-val_Avg2.parquet
-    ├── Minerva_Avg4.parquet
-    └── TheoremQA_Avg2.parquet
+├── test/
+│   ├── AIME2024_Avg16.parquet
+│   ├── gpqa_diamond_Avg4.parquet
+│   ├── Math-500_Avg2.parquet
+│   ├── Minerva_Avg4.parquet
+│   ├── MMLUPro-1000_Avg2.parquet
+│   ├── TheoremQA_Avg2.parquet
+│   └── WebInstruct-verified-val_Avg2.parquet
+└── train/
+    └── rlpr_train.parquet
 ```
 
 ### 3. Prepare Base Model
@@ -135,6 +135,12 @@ After computing ScoreA, run the training script:
 
 ```bash
 bash examples/qwen2_5_7b_rlpr_lora.sh
+```
+
+### 6. Merge Checkpoint in Hugging Face Format
+
+```bash
+python3 scripts/model_merger.py --local_dir checkpoints/easy_r1/exp_name/global_step_1/actor
 ```
 
 **Training Configuration**:
